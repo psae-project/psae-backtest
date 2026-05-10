@@ -1,0 +1,149 @@
+name: Build Windows EXE
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:   # allow manual trigger from GitHub UI
+
+jobs:
+  build-exe:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout psae-backtest
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Checkout all PSAE repos
+        run: |
+          git clone https://github.com/psae-project/psae-core.git     ../psae-core
+          git clone https://github.com/psae-project/psae-signal.git   ../psae-signal
+          git clone https://github.com/psae-project/psae-ingest.git   ../psae-ingest
+          git clone https://github.com/psae-project/psae-factor.git   ../psae-factor
+          git clone https://github.com/psae-project/psae-folio.git    ../psae-folio
+
+      - name: Install CPU-only PyTorch (keeps size manageable)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install all PSAE packages (editable)
+        run: |
+          pip install -e ../psae-core
+          pip install -e ../psae-signal
+          pip install -e ../psae-ingest
+          pip install -e ../psae-factor
+          pip install -e ../psae-folio
+          pip install -e .
+
+      - name: Install extra runtime deps
+        run: |
+          pip install pyinstaller uvicorn fastapi click pyaml
+          python -m spacy download en_core_web_sm
+
+      - name: Write launcher script
+        shell: python
+        run: |
+          import textwrap, pathlib
+          code = textwrap.dedent('''
+          """PSAE Launcher — unified entry point for the Windows executable."""
+          import sys, os, click
+
+          @click.group()
+          def cli():
+              """Presidential Sentiment Alpha Engine"""
+              pass
+
+          @cli.command()
+          @click.option("--start", required=True, help="Start date YYYY-MM-DD")
+          @click.option("--end",   required=True, help="End date YYYY-MM-DD")
+          @click.option("--signals", default=None)
+          @click.option("--cash",  default=1_000_000.0, show_default=True)
+          @click.option("--output", default="results/backtest_result.pkl", show_default=True)
+          def backtest(start, end, signals, cash, output):
+              """Run PSAE backtest engine."""
+              from psae_backtest.run import run
+              run.main(standalone_mode=False, args=[
+                  "--start", start, "--end", end,
+                  "--cash", str(cash), "--output", output,
+                  *(["--signals", signals] if signals else [])
+              ])
+
+          @cli.command()
+          @click.argument("text")
+          @click.option("--provider", default="huggingface_api", show_default=True)
+          def sentiment(text, provider):
+              """Run sentiment analysis on TEXT."""
+              os.environ.setdefault("PSAE_SENTIMENT_PROVIDER", provider)
+              from psae_signal.models.sentiment import SentimentModel
+              result = SentimentModel().predict(text)
+              click.echo(f"Label : {result[\'label\']}")
+              click.echo(f"Score : {result[\'score\']:.4f}")
+
+          @cli.command()
+          @click.option("--source", default="federal_register",
+                        type=click.Choice(["federal_register", "white_house"]))
+          @click.option("--days", default=7, show_default=True)
+          def ingest(source, days):
+              """Ingest recent documents."""
+              from psae_ingest.sources.federal_register import FederalRegisterSource
+              from psae_ingest.sources.white_house import WhiteHouseSource
+              src = FederalRegisterSource() if source == "federal_register" else WhiteHouseSource()
+              docs = src.fetch(days=days)
+              click.echo(f"Fetched {len(docs)} documents")
+              for d in docs[:5]:
+                  click.echo(f"  [{d.get(\'date\',\'?\')}] {d.get(\'title\',\'?\')[:80]}")
+
+          if __name__ == "__main__":
+              cli()
+          ''')
+          pathlib.Path("launcher.py").write_text(code)
+          print("launcher.py written")
+
+      - name: Build EXE with PyInstaller
+        run: |
+          pyinstaller launcher.py `
+            --name psae `
+            --onedir `
+            --console `
+            --collect-all spacy `
+            --collect-all transformers `
+            --collect-all psae `
+            --collect-all psae_signal `
+            --collect-all psae_backtest `
+            --collect-all psae_ingest `
+            --collect-all psae_factor `
+            --collect-all psae_folio `
+            --hidden-import uvicorn.logging `
+            --hidden-import uvicorn.loops.auto `
+            --hidden-import uvicorn.protocols.http.auto `
+            --hidden-import uvicorn.protocols.websockets.auto `
+            --hidden-import uvicorn.lifespan.on `
+            --exclude-module tkinter `
+            --exclude-module matplotlib `
+            --exclude-module notebook `
+            --upx-dir . `
+            --clean
+        shell: pwsh
+
+      - name: Zip the dist folder
+        run: Compress-Archive -Path dist\psae\* -DestinationPath psae-windows-x64.zip
+        shell: pwsh
+
+      - name: Upload EXE as release asset
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: psae-windows-x64.zip
+
+      - name: Upload EXE as workflow artifact (for manual runs)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: psae-windows-x64
+          path: psae-windows-x64.zip
+          retention-days: 14
