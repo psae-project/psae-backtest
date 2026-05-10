@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "psae-backtest"
+version = "0.1.0"
+description = "Event-driven backtesting engine for PSAE (≈ Zipline)"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+dependencies = [
+    "psae-core>=0.1.0",
+    "psae-signal>=0.1.0",
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "exchange-calendars>=4.0",
+    "click>=8.1",
+    "yfinance>=0.2",
+]
+
+[project.optional-dependencies]
+optimize = ["cvxpy>=1.4"]
+dev = ["pytest", "ruff", "mypy", "pytest-cov"]
+
+[project.scripts]
+psae-backtest = "psae_backtest.run:run"
